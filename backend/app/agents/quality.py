@@ -96,10 +96,20 @@ class CompanyVerificationAgent(BaseAgent):
         if target_industries:
             industry_match = company.industry_slug in target_industries if company.industry_slug else None
 
-        exists_confirmed = website_active or source_count >= 2
+        # A mapped listing (Google Maps / OpenStreetMap) that carries a street
+        # address or a phone number is direct evidence the business is registered
+        # and trading. Requiring a live website on top of that would discard every
+        # small business that never built one - exactly the segment being targeted.
+        directory_confirmed = bool(
+            any(src.source_type == "directory_listing" for src in company.sources)
+            and (company.address or company.phone)
+        )
+        exists_confirmed = website_active or directory_confirmed or source_count >= 2
         confidence = 0.3
         if website_active:
             confidence += 0.4
+        elif directory_confirmed:
+            confidence += 0.3
         if source_count >= 2:
             confidence += 0.2
         if source_count >= 3:
@@ -117,6 +127,11 @@ class CompanyVerificationAgent(BaseAgent):
         notes: list[str] = [f"{source_count} independent source(s)."]
         if website_active:
             notes.append("Website responded successfully.")
+        elif directory_confirmed:
+            notes.append(
+                "No website; confirmed by a mapped directory listing with a verified "
+                "address or phone number."
+            )
         elif website is not None:
             notes.append(f"Website unreachable (HTTP {website.http_status}).")
         if duplicate is not None:
@@ -227,13 +242,17 @@ class LeadQualityAgent(BaseAgent):
             reasons.append(f"Source confidence {company.confidence:.2f} is below {min_confidence:.2f}.")
         if target_industries and company.industry_slug and company.industry_slug not in target_industries:
             reasons.append(f"Industry '{company.industry_slug}' is outside campaign targets.")
-        if not company.contacts and not company.website_active:
+        if not company.contacts and not company.website_active and not company.phone:
             reasons.append("No contact route of any kind.")
 
         completeness = compute_completeness(company)
-        # Quality blends how much we know with how well verified it is.
+        # Quality blends how much we know with how well verified it is. The last
+        # term measures whether the business can actually be reached: a live site
+        # is the strongest signal, a listed phone number is a weaker but real one,
+        # so a website-less business is discounted rather than zeroed.
+        reachability = 1.0 if company.website_active else (0.6 if company.phone else 0.0)
         quality = round(
-            100 * (0.5 * completeness + 0.3 * company.confidence + 0.2 * (1.0 if company.website_active else 0.0)),
+            100 * (0.5 * completeness + 0.3 * company.confidence + 0.2 * reachability),
             1,
         )
 

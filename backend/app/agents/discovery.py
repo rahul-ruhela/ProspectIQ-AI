@@ -10,11 +10,11 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.connectors.base import SearchResult
-from app.connectors.places import PlaceResult, overpass_connector
+from app.connectors.places import PlaceResult, google_places_connector, overpass_connector
 from app.connectors.search import available_connectors, connector_statuses
 from app.core.config import settings
 from app.models.company import Company, CompanySource
@@ -56,6 +56,11 @@ TITLE_NOISE = re.compile(
     r"about us?|services|home page)\s*$",
     re.IGNORECASE,
 )
+
+
+def _digits(value: str | None) -> str:
+    """Phone numbers are formatted a dozen ways; compare only their digits."""
+    return re.sub(r"\D", "", value or "")
 
 
 def clean_company_name(title: str, domain: str) -> str:
@@ -166,6 +171,12 @@ class GlobalSearchAgent(BaseAgent):
                                     "query": template.format(industry=term, location=location),
                                     "country_code": country,
                                     "city": location if cities else "",
+                                    # The place to centre a map lookup on. Unlike
+                                    # ``city`` this is always set, so country- and
+                                    # region-wide campaigns still reach the map
+                                    # directories instead of search only.
+                                    "location": location,
+                                    "industry_term": term,
                                     "industry_slug": slug,
                                 }
                             )
@@ -176,6 +187,8 @@ class GlobalSearchAgent(BaseAgent):
                         "query": f"{keyword} {country_names.get(country, country)}",
                         "country_code": country,
                         "city": "",
+                        "location": country_names.get(country, country),
+                        "industry_term": keyword,
                         "industry_slug": industries[0] if industries else "",
                     }
                 )
@@ -220,7 +233,14 @@ class BusinessDiscoveryAgent(BaseAgent):
         "Find genuine businesses matching the campaign, recording the exact source and "
         "URL for every company so nothing enters the database unattributed."
     )
-    tools = ("openstreetmap", "serper", "google_cse", "searxng", "duckduckgo")
+    tools = (
+        "google_places",
+        "openstreetmap",
+        "serper",
+        "google_cse",
+        "searxng",
+        "duckduckgo",
+    )
     input_schema = {
         "type": "object",
         "properties": {
@@ -246,12 +266,17 @@ class BusinessDiscoveryAgent(BaseAgent):
         exclude = [k.lower() for k in payload.get("exclude_keywords") or []]
 
         search_connectors = available_connectors()
-        places_available = overpass_connector.available
+        if settings.DISCOVERY_FANOUT:
+            search_connectors = search_connectors[: max(1, settings.DISCOVERY_MAX_CONNECTORS)]
+        else:
+            search_connectors = search_connectors[:1]
+        places_available = overpass_connector.available or google_places_connector.available
         if not search_connectors and not places_available:
             self.log(
                 ctx,
-                "No discovery connector is configured. Enable OpenStreetMap, or configure "
-                "SERPER_API_KEY, Google CSE, SearXNG or DuckDuckGo.",
+                "No discovery connector is configured. Enable OpenStreetMap or Google Maps "
+                "(GOOGLE_MAPS_API_KEY), or configure SERPER_API_KEY, Google CSE, SearXNG or "
+                "DuckDuckGo.",
                 level="error",
                 connectors=connector_statuses(),
             )
@@ -269,47 +294,75 @@ class BusinessDiscoveryAgent(BaseAgent):
         # OpenStreetMap gives structured records (name, website, phone, address) that
         # are already tied to a citable element URL, so it runs before free-text search.
         if places_available:
-            places_created, places_matched, places_requests = await self._discover_places(
-                ctx, queries, max_companies, exclude, created_ids
-            )
+            (
+                places_created,
+                places_matched,
+                places_requests,
+                places_cost,
+                places_slugs,
+            ) = await self._discover_places(ctx, queries, max_companies, exclude, created_ids)
             matched_existing += places_matched
             http_requests += places_requests
-            if places_created:
-                connectors_used.append(overpass_connector.slug)
+            connector_cost += places_cost
+            if places_created or places_matched:
+                connectors_used.extend(places_slugs)
                 self.log(
                     ctx,
-                    f"OpenStreetMap contributed {places_created} companies "
-                    f"({places_matched} already known).",
+                    f"Map directories ({', '.join(places_slugs) or 'none'}) contributed "
+                    f"{places_created} companies ({places_matched} already known).",
                 )
 
         # --- 2. Free-text search ------------------------------------------
+        # Every configured connector is queried, not just the highest-ranked one.
+        # Providers index different corners of the web and each has its own daily
+        # cap, so fanning out is what turns a thin result set into deep coverage,
+        # and one rate-limited provider no longer ends discovery on its own.
         if not search_connectors:
             self.log(ctx, "No search connector configured; using mapped directories only.")
             queries = []
         else:
-            connector = search_connectors[0]
-            connectors_used.append(connector.slug)
-            self.log(ctx, f"Searching the open web via {connector.name}.")
+            self.log(
+                ctx,
+                "Searching the open web via "
+                + ", ".join(c.name for c in search_connectors)
+                + ".",
+            )
 
+        seen_urls: set[str] = set()
         for spec in queries:
             if len(created_ids) >= max_companies:
                 break
             query = spec.get("query", "")
             if not query:
                 continue
-            try:
-                results = await connector.search(
-                    query, limit=20, country=spec.get("country_code") or None
-                )
-            except Exception as exc:
-                self.log(ctx, f"Search failed for '{query}': {exc}", level="warning")
-                continue
-            http_requests += 1
-            connector_cost += connector.cost_per_call_usd
+
+            results: list[SearchResult] = []
+            result_source: dict[str, str] = {}
+            for connector in search_connectors:
+                try:
+                    hits = await connector.search(
+                        query, limit=20, country=spec.get("country_code") or None
+                    )
+                except Exception as exc:
+                    self.log(
+                        ctx, f"{connector.name} failed for '{query}': {exc}", level="warning"
+                    )
+                    continue
+                http_requests += 1
+                connector_cost += connector.cost_per_call_usd
+                if hits and connector.slug not in connectors_used:
+                    connectors_used.append(connector.slug)
+                for hit in hits:
+                    if hit.url in seen_urls:
+                        continue
+                    seen_urls.add(hit.url)
+                    result_source[hit.url] = connector.name
+                    results.append(hit)
 
             for result in results:
                 if len(created_ids) >= max_companies:
                     break
+                source_name = result_source.get(result.url, result.source or "Web search")
                 domain = domain_of(result.url)
                 if not domain or "." not in domain:
                     continue
@@ -329,7 +382,7 @@ class BusinessDiscoveryAgent(BaseAgent):
 
                 if existing is not None:
                     matched_existing += 1
-                    self._add_source(existing, result, connector.name, "search_result")
+                    self._add_source(existing, result, source_name, "search_result")
                     continue
 
                 company = Company(
@@ -343,14 +396,14 @@ class BusinessDiscoveryAgent(BaseAgent):
                     country_code=(spec.get("country_code") or "").upper()[:2] or None,
                     city=spec.get("city") or None,
                     description=result.snippet[:2000] or None,
-                    source=connector.name,
+                    source=source_name,
                     source_url=result.url,
                     confidence=0.55,  # one source only; verification raises this
                     verification_status=VerificationStatus.NEEDS_VERIFICATION,
                 )
                 ctx.db.add(company)
                 ctx.db.flush()
-                self._add_source(company, result, connector.name, "search_result")
+                self._add_source(company, result, source_name, "search_result")
                 created_ids.append(str(company.id))
 
         # Corroborate: a directory listing that names a discovered company is a second source.
@@ -397,62 +450,97 @@ class BusinessDiscoveryAgent(BaseAgent):
         max_companies: int,
         exclude: list[str],
         created_ids: list[str],
-    ) -> tuple[int, int, int]:
-        """Create companies from mapped business records. Returns (created, matched, requests)."""
+    ) -> tuple[int, int, int, float, list[str]]:
+        """Create companies from mapped business records.
+
+        Map directories are the only sources that know about a registered business
+        with no website - a Maps or OSM listing carries a name, address, phone and
+        category whether or not the owner ever built a site. Those businesses are
+        the platform's core prospect, so unlike a web hit they are kept even when
+        there is no domain to crawl.
+
+        Returns (created, matched, requests, cost_usd, connector slugs used).
+        """
         created_before = len(created_ids)
         matched = 0
         requests = 0
+        cost = 0.0
+        slugs: list[str] = []
 
-        # One Overpass call per (location, industry) pair, not per search query.
+        # One lookup per (location, industry) pair, not per search query.
         seen_areas: set[tuple[str, str, str]] = set()
         for spec in queries:
+            if len(created_ids) >= max_companies:
+                break
             industry_slug = spec.get("industry_slug") or ""
             country = (spec.get("country_code") or "").upper()
-            location = spec.get("city") or ""
+            # ``location`` is set for every plan, including country- and region-wide
+            # campaigns; ``city`` is only set when the operator named cities.
+            location = spec.get("location") or spec.get("city") or ""
             if not location:
-                # Country-wide targeting: Overpass needs a place to centre on, and the
-                # campaign did not name one, so leave this to the search connectors.
                 continue
-            if not overpass_connector.supports(industry_slug):
-                continue
+            industry_term = spec.get("industry_term") or industry_slug.replace("_", " ")
             area = (location.lower(), industry_slug, country)
             if area in seen_areas:
                 continue
             seen_areas.add(area)
-            if len(created_ids) >= max_companies:
-                break
 
-            try:
-                places = await overpass_connector.search_area(
-                    location=f"{location}, {country}" if country else location,
-                    industry_slug=industry_slug,
-                    country_code=country or None,
-                    limit=max(20, max_companies * 2),
-                )
-            except Exception as exc:
-                self.log(ctx, f"OpenStreetMap lookup failed for {location}: {exc}", level="warning")
-                continue
-            requests += 1
+            places: list[PlaceResult] = []
+
+            # Google Maps first: the deepest index of small local businesses, and
+            # the one that reliably lists them without a website.
+            if google_places_connector.available:
+                try:
+                    maps_places = await google_places_connector.search_text(
+                        query=f"{industry_term} in {location}",
+                        country_code=country or None,
+                        limit=max(20, max_companies),
+                    )
+                except Exception as exc:
+                    self.log(ctx, f"Google Maps lookup failed for {location}: {exc}", level="warning")
+                    maps_places = []
+                else:
+                    requests += 1
+                    cost += google_places_connector.cost_per_call_usd
+                    if google_places_connector.slug not in slugs:
+                        slugs.append(google_places_connector.slug)
+                places.extend(maps_places)
+
+            if overpass_connector.available and overpass_connector.supports(industry_slug):
+                try:
+                    osm_places = await overpass_connector.search_area(
+                        location=f"{location}, {country}" if country else location,
+                        industry_slug=industry_slug,
+                        country_code=country or None,
+                        limit=max(20, max_companies * 2),
+                        name_terms=tuple(industry_term.split()),
+                    )
+                except Exception as exc:
+                    self.log(ctx, f"OpenStreetMap lookup failed for {location}: {exc}", level="warning")
+                    osm_places = []
+                else:
+                    requests += 1
+                    if osm_places and overpass_connector.slug not in slugs:
+                        slugs.append(overpass_connector.slug)
+                places.extend(osm_places)
 
             for place in places:
                 if len(created_ids) >= max_companies:
                     break
                 if any(word in place.name.lower() for word in exclude):
                     continue
+
                 domain = domain_of(place.website) if place.website else ""
-                if not place.website or not domain:
-                    # Without a website there is nothing to research and no way to
-                    # deduplicate reliably, so it is not turned into a prospect.
+                if not domain and not settings.DISCOVERY_ALLOW_WEBSITELESS:
+                    continue
+                if not domain and not (place.phone or place.street):
+                    # No site, no phone and no address is not a contactable lead.
                     continue
 
-                existing = ctx.db.execute(
-                    select(Company).where(
-                        Company.organization_id == ctx.organization_id,
-                        Company.domain == domain,
-                    )
-                ).scalar_one_or_none()
+                existing = self._find_existing_place(ctx, place, domain, location)
                 if existing is not None:
                     matched += 1
+                    self._merge_place(existing, place, domain)
                     self._add_place_source(existing, place)
                     continue
 
@@ -461,8 +549,8 @@ class BusinessDiscoveryAgent(BaseAgent):
                     campaign_id=ctx.campaign_id,
                     research_job_id=ctx.research_job_id,
                     name=place.name,
-                    domain=domain,
-                    website=normalise_url(place.website),
+                    domain=domain or None,
+                    website=normalise_url(place.website) if place.website else None,
                     industry_slug=industry_slug or None,
                     category=place.category or None,
                     country_code=(place.country_code or country)[:2] or None,
@@ -474,9 +562,10 @@ class BusinessDiscoveryAgent(BaseAgent):
                     phone=place.phone or None,
                     source=place.source,
                     source_url=place.source_url,
-                    # A mapped record with a name, website and address is stronger
-                    # evidence than a single search hit.
-                    confidence=0.75,
+                    # A mapped record with a name, address and phone is strong
+                    # evidence the business exists even with no site to crawl;
+                    # a site on top of that is stronger still.
+                    confidence=0.75 if domain else 0.65,
                     verification_status=VerificationStatus.NEEDS_VERIFICATION,
                 )
                 ctx.db.add(company)
@@ -484,7 +573,70 @@ class BusinessDiscoveryAgent(BaseAgent):
                 self._add_place_source(company, place)
                 created_ids.append(str(company.id))
 
-        return len(created_ids) - created_before, matched, requests
+        return len(created_ids) - created_before, matched, requests, cost, slugs
+
+    @staticmethod
+    def _find_existing_place(
+        ctx: AgentContext, place: PlaceResult, domain: str, location: str
+    ) -> Company | None:
+        """Match a mapped record against what is already stored.
+
+        A business with a website deduplicates on domain. One without has no domain
+        to key on, so it is matched on phone first (unique in practice) and then on
+        name within the same city.
+        """
+        if domain:
+            return ctx.db.execute(
+                select(Company).where(
+                    Company.organization_id == ctx.organization_id,
+                    Company.domain == domain,
+                )
+            ).scalar_one_or_none()
+
+        phone = _digits(place.phone)
+        if phone:
+            for candidate in (
+                ctx.db.execute(
+                    select(Company).where(
+                        Company.organization_id == ctx.organization_id,
+                        Company.phone.isnot(None),
+                    )
+                )
+                .scalars()
+                .all()
+            ):
+                if _digits(candidate.phone)[-9:] == phone[-9:]:
+                    return candidate
+
+        city = (place.city or location or "").strip()
+        return ctx.db.execute(
+            select(Company)
+            .where(
+                Company.organization_id == ctx.organization_id,
+                func.lower(Company.name) == place.name.strip().lower(),
+                func.lower(func.coalesce(Company.city, "")) == city.lower(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def _merge_place(company: Company, place: PlaceResult, domain: str) -> None:
+        """Fill gaps on an existing record from a stronger mapped source."""
+        if domain and not company.domain:
+            company.domain = domain
+            company.website = normalise_url(place.website)
+        for field_name, value in (
+            ("phone", place.phone),
+            ("address", place.street),
+            ("postal_code", place.postal_code),
+            ("city", place.city),
+            ("category", place.category),
+            ("latitude", place.latitude),
+            ("longitude", place.longitude),
+        ):
+            if value and getattr(company, field_name, None) in (None, ""):
+                setattr(company, field_name, value)
+        company.confidence = min(0.9, company.confidence + 0.1)
 
     @staticmethod
     def _add_place_source(company: Company, place: PlaceResult) -> None:

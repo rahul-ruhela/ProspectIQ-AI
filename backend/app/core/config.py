@@ -92,6 +92,20 @@ class Settings(BaseSettings):
     SEARXNG_URL: str = ""
     ENABLE_DUCKDUCKGO: bool = True
     ENABLE_OPENSTREETMAP: bool = True
+    # Google Maps Places API (New). The only source that reliably lists registered
+    # businesses that have no website, which is the platform's core prospect type.
+    GOOGLE_MAPS_API_KEY: str = ""
+    ENABLE_GOOGLE_PLACES: bool = True
+    # Deep research: query every configured search connector instead of only the
+    # highest-ranked one. Costs more requests per query but multiplies recall, and
+    # keeps a single provider's rate limit from ending discovery.
+    DISCOVERY_FANOUT: bool = True
+    # Maximum search connectors queried per query when fan-out is on.
+    DISCOVERY_MAX_CONNECTORS: int = 4
+    # Create prospects for businesses that have no website at all. These are found
+    # through mapped directories (Google Maps / OpenStreetMap) and deduplicated on
+    # name + city + phone rather than on domain.
+    DISCOVERY_ALLOW_WEBSITELESS: bool = True
 
     # --- crawling ---
     HTTP_USER_AGENT: str = "ProspectIQ-AI/1.0 (+https://prospectiq.ai/bot)"

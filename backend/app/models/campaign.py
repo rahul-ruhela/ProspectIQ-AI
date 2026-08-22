@@ -58,7 +58,7 @@ class CampaignFilter(UUIDMixin, TimestampMixin, Base):
     employee_min: Mapped[int | None] = mapped_column(Integer)
     employee_max: Mapped[int | None] = mapped_column(Integer)
     min_opportunity_score: Mapped[float] = mapped_column(Float, default=40.0, nullable=False)
-    require_website: Mapped[bool] = mapped_column(default=True, nullable=False)
+    require_website: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     campaign: Mapped[Campaign] = relationship(back_populates="filters")
 

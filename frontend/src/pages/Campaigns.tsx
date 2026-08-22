@@ -118,6 +118,9 @@ function CreateCampaignModal({ open, onClose }: { open: boolean; onClose: () => 
   const [selectedServices, setSelectedServices] = useState<string[]>([])
   const [cities, setCities] = useState('')
   const [minScore, setMinScore] = useState(40)
+  // Off by default: a registered business with no website is the highest-value
+  // prospect for the services being sold, so it must not be filtered out.
+  const [requireWebsite, setRequireWebsite] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const mutation = useMutation({
@@ -136,7 +139,7 @@ function CreateCampaignModal({ open, onClose }: { open: boolean; onClose: () => 
             .map((c) => c.trim())
             .filter(Boolean),
           min_opportunity_score: minScore,
-          require_website: true,
+          require_website: requireWebsite,
         },
       }),
     onSuccess: () => {
@@ -307,6 +310,23 @@ function CreateCampaignModal({ open, onClose }: { open: boolean; onClose: () => 
             />
           </div>
         </div>
+
+        <label className="flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-3 dark:border-slate-700">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={requireWebsite}
+            onChange={(event) => setRequireWebsite(event.target.checked)}
+          />
+          <span className="text-sm">
+            <span className="font-medium">Only keep businesses that have a website</span>
+            <span className="block text-slate-500 dark:text-slate-400">
+              Leave this off to include registered businesses found on Google Maps and
+              OpenStreetMap that have no website at all — usually the strongest prospects
+              for a web or automation offer.
+            </span>
+          </span>
+        </label>
 
         {error && (
           <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">

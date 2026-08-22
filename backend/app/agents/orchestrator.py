@@ -269,7 +269,7 @@ class CEOOrchestratorAgent(BaseAgent):
                 company,
                 target_industries=target_industries,
                 offered_services=offered_services,
-                require_website=bool(filters.require_website) if filters else True,
+                require_website=bool(filters.require_website) if filters else False,
                 min_score=float(filters.min_opportunity_score) if filters else 40.0,
             )
             verified += 1 if outcome["verified"] else 0

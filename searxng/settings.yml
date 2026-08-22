@@ -1,0 +1,25 @@
+# ProspectIQ's SearXNG instance.
+# The image writes its own defaults into this directory on first boot and merges
+# this file over them, so only the settings that must differ are listed here.
+use_default_settings: true
+
+server:
+  # Read from SEARXNG_SECRET in the environment.
+  secret_key: "change-me-searxng-secret"
+  limiter: false
+  image_proxy: false
+
+search:
+  # The connector requests format=json. The stock config allows html and rss
+  # only, and silently returns HTML otherwise, so json must be added explicitly.
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20

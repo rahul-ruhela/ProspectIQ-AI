@@ -34,6 +34,38 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Self-hosted meta-search. It queries Google, Bing, Brave, Mojeek and friends in
+  # one call and returns JSON, which gives discovery unmetered reach without a
+  # per-query bill. The JSON format is off in the stock config, so it is turned on
+  # here explicitly - without it every request comes back as HTML and the
+  # connector reads zero results.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: prospectiq-searxng
+    environment:
+      SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT:-8080}/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-searxng-secret}
+      # Bots are rate-limited by default and the backend is one; the limiter is
+      # off because this instance is only reachable from the compose network.
+      SEARXNG_LIMITER: "false"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    ports:
+      - "${SEARXNG_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
   backend:
     build:
       context: ./backend
@@ -43,6 +75,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-prospectiq}:${POSTGRES_PASSWORD:-prospectiq}@postgres:5432/${POSTGRES_DB:-prospectiq}
       REDIS_URL: redis://redis:6379/0
+      # Inside the compose network SearXNG answers on its service name. This
+      # overrides whatever .env holds, which is the host-side URL.
+      SEARXNG_URL: http://searxng:8080
     command: >
       sh -c "alembic upgrade head &&
              python -m app.seed.seeder &&
@@ -54,6 +89,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      searxng:
+        condition: service_started
     restart: unless-stopped
 
   worker:
@@ -65,6 +102,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-prospectiq}:${POSTGRES_PASSWORD:-prospectiq}@postgres:5432/${POSTGRES_DB:-prospectiq}
       REDIS_URL: redis://redis:6379/0
+      # Inside the compose network SearXNG answers on its service name. This
+      # overrides whatever .env holds, which is the host-side URL.
+      SEARXNG_URL: http://searxng:8080
     # Research jobs are long-running and IO-bound; one process per queue keeps
     # a stuck crawl from blocking enrichment work.
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=info --concurrency=4 -Q research,enrichment,default
@@ -89,6 +129,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-prospectiq}:${POSTGRES_PASSWORD:-prospectiq}@postgres:5432/${POSTGRES_DB:-prospectiq}
       REDIS_URL: redis://redis:6379/0
+      # Inside the compose network SearXNG answers on its service name. This
+      # overrides whatever .env holds, which is the host-side URL.
+      SEARXNG_URL: http://searxng:8080
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=info
     # Beat only publishes to the broker; there is nothing meaningful to probe.
     healthcheck:

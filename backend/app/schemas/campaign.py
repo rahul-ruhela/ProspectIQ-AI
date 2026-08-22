@@ -22,7 +22,10 @@ class CampaignFilterIn(BaseModel):
     employee_min: int | None = Field(default=None, ge=1)
     employee_max: int | None = Field(default=None, ge=1)
     min_opportunity_score: float = Field(default=40.0, ge=0, le=100)
-    require_website: bool = True
+    # A registered business without a website is the platform's core prospect, so
+    # discovery keeps it by default. Set true to restrict a campaign to businesses
+    # that already have a site.
+    require_website: bool = False
 
 
 class CampaignFilterOut(CampaignFilterIn, ORMModel):

@@ -257,9 +257,9 @@ def available_connectors() -> list[SearchConnector]:
 
 def connector_statuses() -> list[dict[str, Any]]:
     """Health of every discovery source, mapped directories included."""
-    from app.connectors.places import overpass_connector
+    from app.connectors.places import google_places_connector, overpass_connector
 
-    sources = [overpass_connector, *ALL_CONNECTORS]
+    sources = [google_places_connector, overpass_connector, *ALL_CONNECTORS]
     return [
         {"slug": c.slug, "name": c.name, "available": c.available, "reason": c.status().reason}
         for c in sources
