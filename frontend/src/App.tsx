@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import DevStack from './components/DevStack'
 import Layout from './components/Layout'
 import { Loading } from './components/ui'
 import Admin from './pages/Admin'
@@ -62,38 +63,40 @@ function Bootstrap({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Bootstrap>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
-            <Route
-              element={
-                <RequireAuth>
-                  <Layout />
-                </RequireAuth>
-              }
-            >
-              <Route index element={<Dashboard />} />
-              <Route path="campaigns" element={<Campaigns />} />
-              <Route path="campaigns/:id" element={<CampaignDetail />} />
-              <Route path="jobs" element={<Jobs />} />
-              <Route path="jobs/:id" element={<JobDetail />} />
-              <Route path="agents" element={<Agents />} />
-              <Route path="monitoring" element={<AgentMonitoring />} />
-              <Route path="companies" element={<Companies />} />
-              <Route path="companies/:id" element={<CompanyDetail />} />
-              <Route path="prospects" element={<Prospects />} />
-              <Route path="reports" element={<Reports />} />
-              <Route path="crm" element={<Crm />} />
-              <Route path="analytics" element={<Analytics />} />
-              <Route path="admin" element={<Admin />} />
-              <Route path="settings" element={<SettingsPage />} />
-            </Route>
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Bootstrap>
-      </BrowserRouter>
+      <DevStack>
+        <BrowserRouter>
+          <Bootstrap>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route path="/register" element={<Register />} />
+              <Route
+                element={
+                  <RequireAuth>
+                    <Layout />
+                  </RequireAuth>
+                }
+              >
+                <Route index element={<Dashboard />} />
+                <Route path="campaigns" element={<Campaigns />} />
+                <Route path="campaigns/:id" element={<CampaignDetail />} />
+                <Route path="jobs" element={<Jobs />} />
+                <Route path="jobs/:id" element={<JobDetail />} />
+                <Route path="agents" element={<Agents />} />
+                <Route path="monitoring" element={<AgentMonitoring />} />
+                <Route path="companies" element={<Companies />} />
+                <Route path="companies/:id" element={<CompanyDetail />} />
+                <Route path="prospects" element={<Prospects />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="crm" element={<Crm />} />
+                <Route path="analytics" element={<Analytics />} />
+                <Route path="admin" element={<Admin />} />
+                <Route path="settings" element={<SettingsPage />} />
+              </Route>
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Bootstrap>
+        </BrowserRouter>
+      </DevStack>
     </QueryClientProvider>
   )
 }

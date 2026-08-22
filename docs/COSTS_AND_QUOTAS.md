@@ -1,0 +1,176 @@
+# What a research job actually costs
+
+Short answer: **with the current configuration, nothing.** But the number shown on a
+job is real accounting, not decoration, so it is worth knowing what it counts.
+
+---
+
+## 1. Where the `cost_usd` on a job comes from
+
+```
+job.cost_usd = LLM token cost + connector call cost
+```
+
+### LLM cost
+
+The platform makes far fewer model calls than people assume. There are exactly
+**two** LLM call sites in the whole codebase:
+
+| Call site | When | Tier | Frequency |
+|---|---|---|---|
+| `orchestrator.py` — campaign brief interpretation | Once per job | cheap | **1 per job** |
+| `report.py` — narrative sales report | Per qualified company | smart | **1 per company scoring ≥ 60** |
+
+So a 200-company job that qualifies 30 prospects makes **31 LLM calls**, not 200 and
+not thousands. Everything else — scoring, verification, tech detection, buying
+signals, opportunity rules — is deterministic Python and costs nothing.
+
+There is already a spend gate in `_worth_llm_spend()`: the expensive model is only
+used on companies that already scored ≥ 60. Low-quality prospects never reach it.
+
+**Under `LLM_FREE_TIER_ONLY=true`, `estimate_cost()` returns `0.0`.** Reporting list
+prices for calls that were never billed would eat campaign budgets that were never
+spent, so free-tier runs record exactly what they cost: zero.
+
+### Connector cost
+
+| Connector | Per call | Real money? |
+|---|---|---|
+| OpenStreetMap | $0.000 | No — free and unmetered |
+| DuckDuckGo | $0.000 | No — free, rate limited |
+| SearXNG | $0.000 | No — if you self-host |
+| Serper | $0.001 | Only after your free credits run out |
+| Google CSE | $0.005 | Only after 100 queries/day |
+
+These are **estimates for budgeting**, not invoices. Nothing in this platform can
+charge your card — the numbers exist so `campaign.budget_usd` can stop a runaway job
+before it becomes expensive.
+
+### The budget guard
+
+The orchestrator checks before every company:
+
+```python
+if campaign.budget_usd and (campaign.spent_usd + ctx.usage.cost_usd) > campaign.budget_usd:
+    # stop research
+```
+
+Set `budget_usd` on a campaign and the job stops itself rather than overrunning.
+
+---
+
+## 2. Using free tiers across providers
+
+You asked to rotate free tiers across Gemini, OpenAI and Anthropic. One correction
+worth making plainly, because it changes the design:
+
+> **OpenAI and Anthropic have no free tier.** Both bill from the first token. There
+> is no daily free allowance to rotate onto. Only Gemini offers a genuine no-card
+> free tier.
+
+So rotating *across vendors* is not possible. What **is** possible, and is now
+implemented, is rotating across **models** — because free quotas are metered per
+model per day, not per vendor. Three flash models is roughly three times the daily
+free capacity of one.
+
+### Model chains
+
+`backend/app/core/config.py`:
+
+```
+LLM_CHEAP_MODEL_CHAIN=gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest
+LLM_SMART_MODEL_CHAIN=gemini-3.5-flash,gemini-3.7-flash,gemini-flash-latest
+```
+
+Each tier walks its chain left to right. When a model returns `429`, the facade:
+
+1. Marks that model exhausted for the rest of the **UTC day**.
+2. Moves to the next model in the chain and retries the same work.
+3. Falls back to the deterministic rules engine only when the whole chain is spent.
+
+Only quota exhaustion advances the chain. An auth or network error is returned
+immediately — it would fail identically on every model, so retrying would just
+multiply one failure by the chain length.
+
+### The quota ledger
+
+`backend/app/llm/quota.py` tracks calls and exhaustion per model per UTC day, in
+**Redis** so the API process and the Celery workers share one view. Without shared
+state each worker would rediscover a spent quota independently, wasting an HTTP
+round trip per call — and a large job makes thousands.
+
+Check what is left:
+
+```bash
+curl http://localhost:8000/api/v1/system/status | python -m json.tool
+```
+
+Look under `llm.quota` for `used_today` and `exhausted` per model.
+
+After fixing billing or swapping a key, clear the flags without waiting for
+midnight:
+
+```bash
+cd backend
+venv/Scripts/python.exe -c "from app.llm.quota import get_ledger; print(get_ledger().reset())"
+```
+
+### The hard spend guard
+
+`LLM_FREE_TIER_ONLY=true` refuses **every model without a free tier**, even when a
+paid key sits in `.env`. Your Anthropic and OpenAI keys are still in the file and
+are unreachable — verified: `claude-opus-5` and `gpt-4o` both return
+*"has no free tier and LLM_FREE_TIER_ONLY is on."*
+
+Failover chains respect the guard too, so no chain can ever walk onto a billed
+vendor.
+
+---
+
+## 3. Spending fewer tokens
+
+Already in place:
+
+| Measure | Effect |
+|---|---|
+| `_worth_llm_spend()` gate | The smart model only runs on companies scoring ≥ 60 |
+| `LLM_MAX_PROMPT_CHARS=12000` | Prompts truncated before sending. Crawled page text is the only unbounded input and its tail is boilerplate |
+| Report `max_tokens` 4096 → **1536** | The report schema is a handful of short fields; the rest was unused headroom, and on a metered tier headroom is the cost |
+| `thinkingConfig: {thinkingBudget: 0}` on flash models | No thinking tokens billed against your per-minute budget |
+| Cheap tier by default | Only report synthesis uses the smart tier |
+| Exhaustion memoised in Redis | A spent model costs zero further round trips that day |
+
+---
+
+## 4. Current status of your keys
+
+Measured against live endpoints on 2026-08-22:
+
+| Key | Status |
+|---|---|
+| Serper | ✅ Working — returns real results |
+| Google CSE key | ✅ Valid |
+| Google CSE cx (`410c77a9df4d44063`) | ⚠️ Correct ID, but **Custom Search JSON API is not enabled** on the project |
+| Gemini | ⚠️ Authenticates, but **prepaid balance is empty** on project `89788847888` |
+
+### To fix Google CSE
+
+The `cx` was stored as a full URL; only the ID belongs in the variable, and that is
+now corrected. The remaining error is:
+
+```
+403 — This project does not have the access to Custom Search JSON API.
+```
+
+Enable it: <https://console.cloud.google.com/apis/library/customsearch.googleapis.com>
+→ select project `89788847888` → **Enable**.
+
+### To fix Gemini
+
+Every model returns `429 — "Your prepayment credits are depleted"`. This is not a
+daily ceiling that resets; the project is on prepaid billing with a zero balance.
+Issue a key from an AI Studio project that still has free-tier access, or load
+credits — which is the spend you asked to avoid.
+
+Until then discovery runs on **OpenStreetMap + Serper + DuckDuckGo**, and every
+deterministic feature works normally. The only loss is narrative report prose.

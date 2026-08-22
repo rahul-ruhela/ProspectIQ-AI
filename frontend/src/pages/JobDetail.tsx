@@ -3,6 +3,7 @@ import { ArrowLeft, Ban, Pause, Play } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { errorMessage } from '../api/client'
 import { cancelJob, getJob, listAgentLogs, listAgentTasks, pauseJob, resumeJob } from '../api/endpoints'
+import AgentFloor from '../components/AgentFloor'
 import {
   Card,
   EmptyState,
@@ -123,6 +124,14 @@ export default function JobDetail() {
         <StatTile label="Qualified" value={j.prospects_qualified} tone="positive" />
         <StatTile label="Cost" value={formatMoney(j.cost_usd, 4)} />
       </div>
+
+      <Card
+        className="mt-6"
+        title="The department floor"
+        description="Every AI employee on this job. Agents pulse while they work."
+      >
+        <AgentFloor tasks={tasks.data?.items ?? []} live={live} />
+      </Card>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
         <Card title="Research plan" description="Built by the CEO orchestrator">

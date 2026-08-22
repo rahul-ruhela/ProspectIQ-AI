@@ -119,6 +119,8 @@ services:
       - redis
     restart: unless-stopped
 
+  # The production-style static build. `npm run dev` serves the same app on 5173
+  # with hot reload, so this publishes elsewhere to keep both usable at once.
   frontend:
     build:
       context: ./frontend
@@ -126,7 +128,7 @@ services:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
     container_name: prospectiq-frontend
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5174}:80"
     depends_on:
       - backend
     restart: unless-stopped

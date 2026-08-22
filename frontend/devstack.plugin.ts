@@ -21,7 +21,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
  */
 const SERVICES = ['postgres', 'redis', 'backend', 'worker', 'beat', 'flower']
 
-const BACKEND_HEALTH = 'http://localhost:8000/api/v1/health'
+// Mounted at the root in app/main.py, outside the versioned API prefix.
+const BACKEND_HEALTH = 'http://localhost:8000/health'
 const IS_WINDOWS = process.platform === 'win32'
 
 type Phase = 'idle' | 'starting' | 'stopping'

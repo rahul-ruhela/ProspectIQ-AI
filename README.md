@@ -200,9 +200,12 @@ rolled up nightly into cost-per-prospect. Campaigns stop when their budget is ex
 
 | Document | Contents |
 |---|---|
+| [`docs/RUNNING.md`](docs/RUNNING.md) | **Start here** — how to run the app, the one-button dev launcher, ports |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Full installation, configuration and deployment (AWS / Azure) |
 | [`docs/API.md`](docs/API.md) | Endpoint reference and worked examples |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Agent contract, request lifecycle, schema map |
+| [`docs/DISCOVERY_SOURCES.md`](docs/DISCOVERY_SOURCES.md) | Which sites the agents search, and how prospects are filtered |
+| [`docs/COSTS_AND_QUOTAS.md`](docs/COSTS_AND_QUOTAS.md) | What a research job costs, free-tier model rotation, spend guards |
 | `/docs` (running app) | Interactive Swagger UI |
 
 ---
