@@ -171,11 +171,27 @@ SERVICES: tuple[tuple[str, str, str, float, tuple[str, ...]], ...] = (
      "Connecting the tools a business already pays for.", 5500.0, ()),
 )
 
+# (provider slug, display name, base url)
+AI_PROVIDERS: tuple[tuple[str, str, str], ...] = (
+    ("anthropic", "Anthropic", "https://api.anthropic.com"),
+    ("openai", "OpenAI", "https://api.openai.com/v1"),
+    ("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta"),
+)
+
 # (provider slug, model id, display name, tier, input $/Mtok, output $/Mtok, max output)
+# Gemini costs are paid-tier list prices. They are only ever charged if billing is
+# enabled on the Google project and LLM_FREE_TIER_ONLY is turned off; under the
+# default free-tier guard these models cost nothing.
 AI_MODELS: tuple[tuple[str, str, str, str, float, float, int], ...] = (
+    ("google", "gemini-3.5-flash", "Gemini 3.5 Flash", "smart", 0.0, 0.0, 8192),
+    ("google", "gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", "cheap", 0.0, 0.0, 8192),
+    ("google", "gemini-2.5-flash", "Gemini 2.5 Flash (retired for new projects)",
+     "smart", 0.30, 2.50, 8192),
     ("anthropic", "claude-opus-5", "Claude Opus 5", "smart", 5.00, 25.00, 64000),
     ("anthropic", "claude-sonnet-5", "Claude Sonnet 5", "smart", 3.00, 15.00, 64000),
     ("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", "cheap", 1.00, 5.00, 8192),
+    ("openai", "gpt-4o", "GPT-4o", "smart", 2.50, 10.00, 16384),
+    ("openai", "gpt-4o-mini", "GPT-4o mini", "cheap", 0.15, 0.60, 16384),
 )
 
 # (slug, name, kind, requires key, cost per call, notes)

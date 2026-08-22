@@ -1,34 +1,72 @@
-"""Anthropic client wrapper with tiered model selection, strict JSON output and cost accounting.
+"""Multi-provider LLM facade with tiered model selection, strict JSON output and cost accounting.
 
 Every call returns an :class:`LLMResult` carrying token counts and a USD cost so the
-platform can enforce per-campaign budgets. When no API key is configured the wrapper
-reports itself unavailable and callers fall back to their deterministic paths — the
-platform never invents data just because the LLM is missing.
+platform can enforce per-campaign budgets. The vendor is inferred from the configured
+model id, so switching a tier between Claude and GPT is a configuration change only.
+When no key is configured for the selected model's vendor the wrapper reports itself
+unavailable and callers fall back to their deterministic paths - the platform never
+invents data just because the LLM is missing.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.llm.quota import get_ledger
+from app.llm.providers import (
+    ANTHROPIC,
+    GOOGLE,
+    OPENAI,
+    PROVIDER_CLASSES,
+    LLMQuotaExhausted,
+    Provider,
+    provider_for,
+)
 
 logger = get_logger(__name__)
-
-try:  # the SDK is a hard requirement, but importing must not break tooling
-    import anthropic
-except ImportError:  # pragma: no cover
-    anthropic = None  # type: ignore[assignment]
 
 
 # USD per million tokens. Kept in sync with the admin `ai_models` table, which is
 # seeded from this map and is authoritative once an operator edits it.
+# The Gemini rows are the paid-tier list prices: they apply only if billing is
+# enabled on the Google project AND LLM_FREE_TIER_ONLY is turned off.
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
 }
+
+# Gemini's flash and flash-lite tiers are the ones Google serves on the no-card AI
+# Studio free tier. Matching the family rather than pinning exact ids is deliberate:
+# Google retires ids for new projects fast (2.5 -> 3.x within a year), and an
+# explicit list would silently block every current model as it rotated.
+_FREE_TIER_PREFIX = "gemini-"
+_FREE_TIER_MARKERS = ("flash",)
+
+# Never free at any generation, so they stay blocked under the guard.
+_NEVER_FREE_MARKERS = ("pro", "ultra", "computer-use")
+
+
+def is_free_tier(model: str) -> bool:
+    """True when ``model`` can be served without a billing account.
+
+    Only Gemini qualifies: Anthropic and OpenAI bill from the first token, so a
+    key for either is unusable while LLM_FREE_TIER_ONLY is set.
+    """
+    name = (model or "").split("/")[-1].lower()
+    if not name.startswith(_FREE_TIER_PREFIX):
+        return False
+    if any(marker in name for marker in _NEVER_FREE_MARKERS):
+        return False
+    return any(marker in name for marker in _FREE_TIER_MARKERS)
+
 
 CHEAP = "cheap"
 SMART = "smart"
@@ -64,25 +102,112 @@ class LLMUsageTotals:
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    in_rate, out_rate = MODEL_PRICING.get(model, (0.0, 0.0))
+    # Under the free-tier guard nothing is billable, so the honest cost is zero -
+    # reporting list prices there would burn campaign budgets that were never spent.
+    if settings.LLM_FREE_TIER_ONLY and is_free_tier(model):
+        return 0.0
+    rates = MODEL_PRICING.get(model)
+    if rates is None:
+        # Silently pricing an unlisted model at zero would let a paid run report a
+        # $0 spend and slip past every campaign budget check.
+        logger.warning("llm_pricing_unknown", model=model)
+        return 0.0
+    in_rate, out_rate = rates
     return (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
 
 
 class LLMClient:
-    """Thin, cost-aware facade over the Anthropic Messages API."""
+    """Thin, cost-aware facade over whichever vendors are configured."""
 
-    def __init__(self, api_key: str | None = None) -> None:
-        self._api_key = api_key or settings.ANTHROPIC_API_KEY
-        self._client = None
-        if self.available and anthropic is not None:
-            self._client = anthropic.Anthropic(api_key=self._api_key)
+    def __init__(self, api_keys: dict[str, str] | None = None) -> None:
+        self._api_keys = api_keys or {
+            ANTHROPIC: settings.ANTHROPIC_API_KEY,
+            OPENAI: settings.OPENAI_API_KEY,
+            GOOGLE: settings.GEMINI_API_KEY,
+        }
+        self._providers: dict[str, Provider] = {}
+        for slug, cls in PROVIDER_CLASSES.items():
+            provider = cls(self._api_keys.get(slug, ""))
+            if provider.available:
+                self._providers[slug] = provider
 
     @property
     def available(self) -> bool:
-        return bool(settings.LLM_ENABLED and self._api_key and anthropic is not None)
+        """True when both tiers still have at least one model able to answer today."""
+        if not settings.LLM_ENABLED:
+            return False
+        return all(bool(self.usable_chain(t)) for t in (CHEAP, SMART))
+
+    def available_for(self, model: str) -> bool:
+        """True when the vendor serving ``model`` has a usable client.
+
+        The free-tier guard is enforced here rather than at the call site so every
+        path into the facade - agents, report synthesis, health checks - sees the
+        same answer.
+        """
+        if not settings.LLM_ENABLED:
+            return False
+        if settings.LLM_FREE_TIER_ONLY and not is_free_tier(model):
+            return False
+        return provider_for(model) in self._providers
+
+    def unavailable_reason(self, model: str) -> str | None:
+        """Why ``model`` cannot be called, or None when it can."""
+        if not settings.LLM_ENABLED:
+            return "LLM_ENABLED is false."
+        if settings.LLM_FREE_TIER_ONLY and not is_free_tier(model):
+            return (
+                f"{model} has no free tier and LLM_FREE_TIER_ONLY is on. "
+                "Use a gemini-* free-tier model, or set LLM_FREE_TIER_ONLY=false "
+                "to allow paid calls."
+            )
+        if provider_for(model) not in self._providers:
+            return f"No API key configured for the {provider_for(model)} provider."
+        return None
+
+    @property
+    def configured_providers(self) -> list[str]:
+        return sorted(self._providers)
 
     def model_for(self, tier: str) -> str:
-        return settings.LLM_SMART_MODEL if tier == SMART else settings.LLM_CHEAP_MODEL
+        """The preferred model for a tier - the head of its chain."""
+        chain = self.chain_for(tier)
+        return chain[0] if chain else ""
+
+    def chain_for(self, tier: str) -> list[str]:
+        """Every model that may serve ``tier``, best first."""
+        chain = settings.smart_model_chain if tier == SMART else settings.cheap_model_chain
+        # A model the guard forbids must never appear, or failover would walk
+        # straight onto a billed vendor.
+        return [m for m in chain if not settings.LLM_FREE_TIER_ONLY or is_free_tier(m)]
+
+    def usable_chain(self, tier: str) -> list[str]:
+        """Chain members that are configured and have not run out today."""
+        ledger = get_ledger()
+        return [
+            m
+            for m in self.chain_for(tier)
+            if provider_for(m) in self._providers and not ledger.is_exhausted(m)
+        ]
+
+    def quota_snapshot(self) -> dict[str, Any]:
+        """Per-model daily usage, for the status endpoint and the UI."""
+        ledger = get_ledger()
+        models: list[str] = []
+        for tier in (CHEAP, SMART):
+            for model in self.chain_for(tier):
+                if model not in models:
+                    models.append(model)
+        return {"models": ledger.snapshot(models)}
+
+    @staticmethod
+    def _trim(prompt: str) -> str:
+        """Cap prompt size. The tail of crawled text is boilerplate, so it goes first."""
+        limit = settings.LLM_MAX_PROMPT_CHARS
+        if limit <= 0 or len(prompt) <= limit:
+            return prompt
+        logger.info("llm_prompt_truncated", original_chars=len(prompt), limit=limit)
+        return prompt[:limit] + "\n\n[truncated to fit the token budget]"
 
     def complete(
         self,
@@ -92,26 +217,17 @@ class LLMClient:
         tier: str = CHEAP,
         max_tokens: int | None = None,
     ) -> LLMResult:
-        """Plain text completion."""
-        if not self.available:
-            return LLMResult(ok=False, error="llm_unavailable")
-
-        model = self.model_for(tier)
-        try:
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "max_tokens": max_tokens or settings.LLM_MAX_OUTPUT_TOKENS,
-                "system": system,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            kwargs.update(self._reasoning_kwargs(model))
-            response = self._client.messages.create(**kwargs)  # type: ignore[union-attr]
-        except Exception as exc:  # network, auth, rate limits - all non-fatal here
-            logger.warning("llm_call_failed", model=model, error=str(exc))
-            return LLMResult(ok=False, model=model, error=str(exc))
-
-        text = "".join(b.text for b in response.content if b.type == "text")
-        return self._to_result(response, model, text=text)
+        """Plain text completion, failing over across the tier's model chain."""
+        prompt = self._trim(prompt)
+        return self._attempt(
+            tier,
+            lambda provider, model: provider.complete(
+                model=model,
+                system=system,
+                prompt=prompt,
+                max_tokens=max_tokens or settings.LLM_MAX_OUTPUT_TOKENS,
+            ),
+        )
 
     def structured(
         self,
@@ -125,72 +241,80 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> LLMResult:
         """Force the model to answer through a strict JSON tool schema."""
-        if not self.available:
-            return LLMResult(ok=False, error="llm_unavailable")
-
-        model = self.model_for(tier)
-        tool = {
-            "name": tool_name,
-            "description": tool_description,
-            "input_schema": schema,
-            "strict": True,
-        }
-        try:
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "max_tokens": max_tokens or settings.LLM_MAX_OUTPUT_TOKENS,
-                "system": system,
-                "messages": [{"role": "user", "content": prompt}],
-                "tools": [tool],
-                "tool_choice": {"type": "tool", "name": tool_name},
-            }
-            kwargs.update(self._reasoning_kwargs(model, forced_tool=True))
-            response = self._client.messages.create(**kwargs)  # type: ignore[union-attr]
-        except Exception as exc:
-            logger.warning("llm_structured_failed", model=model, error=str(exc))
-            return LLMResult(ok=False, model=model, error=str(exc))
-
-        data: dict[str, Any] | None = None
-        for block in response.content:
-            if block.type == "tool_use" and block.name == tool_name:
-                # Tool inputs may carry provider-specific JSON escaping; never string-match.
-                data = json.loads(json.dumps(block.input))
-                break
-
-        result = self._to_result(response, model, text="")
-        result.data = data
-        result.ok = result.ok and data is not None
-        if data is None and result.error is None:
-            result.error = "no_tool_output"
+        prompt = self._trim(prompt)
+        result = self._attempt(
+            tier,
+            lambda provider, model: provider.structured(
+                model=model,
+                system=system,
+                prompt=prompt,
+                schema=schema,
+                tool_name=tool_name,
+                tool_description=tool_description,
+                max_tokens=max_tokens or settings.LLM_MAX_OUTPUT_TOKENS,
+            ),
+        )
+        if result.ok and result.data is None:
+            result.ok = False
+            result.error = result.error or "no_tool_output"
         return result
 
-    @staticmethod
-    def _reasoning_kwargs(model: str, forced_tool: bool = False) -> dict[str, Any]:
-        """Thinking configuration differs per model generation."""
-        if model.startswith("claude-opus-5") or model.startswith("claude-sonnet-5"):
-            if forced_tool:
-                # A forced tool choice already guarantees a structured answer;
-                # medium effort keeps enrichment affordable.
-                return {"thinking": {"type": "disabled"}, "output_config": {"effort": "medium"}}
-            return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
-        # Haiku 4.5 and older generations take no thinking configuration here.
-        return {}
+    def _attempt(self, tier: str, call: Any) -> LLMResult:
+        """Run ``call`` against each model in the tier chain until one answers.
+
+        Only quota exhaustion advances to the next model: it is the one failure that
+        another model can genuinely fix. A transport or auth error would recur
+        identically down the chain, so it is returned immediately rather than
+        multiplied by the chain length.
+        """
+        ledger = get_ledger()
+        chain = self.chain_for(tier)
+        if not chain:
+            return LLMResult(ok=False, error="llm_unavailable")
+
+        last: LLMResult | None = None
+        for model in chain:
+            provider = self._providers.get(provider_for(model))
+            if provider is None:
+                continue
+            if ledger.is_exhausted(model):
+                continue
+
+            try:
+                response = call(provider, model)
+            except LLMQuotaExhausted as exc:
+                # Remembered for the rest of the UTC day so the next of the job's
+                # many calls skips this model instead of re-probing it.
+                ledger.mark_exhausted(model, str(exc))
+                last = LLMResult(ok=False, model=model, error="quota_exhausted")
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "llm_call_failed", provider=provider.slug, model=model, error=str(exc)
+                )
+                return LLMResult(ok=False, model=model, error=str(exc))
+
+            ledger.record_call(model)
+            return self._to_result(response, model)
+
+        if last is not None:
+            logger.warning("llm_chain_exhausted", tier=tier, chain=chain)
+            return last
+        return LLMResult(ok=False, model=chain[0], error="llm_unavailable")
 
     @staticmethod
-    def _to_result(response: Any, model: str, text: str) -> LLMResult:
-        usage = getattr(response, "usage", None)
-        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        stop_reason = getattr(response, "stop_reason", None)
+    def _to_result(response: Any, model: str) -> LLMResult:
+        refused = response.stop_reason == "refusal"
         return LLMResult(
-            text=text,
+            text=response.text,
+            data=response.data,
             model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=estimate_cost(model, input_tokens, output_tokens),
-            ok=stop_reason != "refusal",
-            stop_reason=stop_reason,
-            error="refusal" if stop_reason == "refusal" else None,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=estimate_cost(model, response.input_tokens, response.output_tokens),
+            ok=not refused,
+            stop_reason=response.stop_reason,
+            error="refusal" if refused else None,
         )
 
 

@@ -123,7 +123,9 @@ def build_report(
             tool_name="sales_intelligence_report",
             tool_description="Record the grounded sales-intelligence report for this company.",
             tier=SMART,
-            max_tokens=4096,
+            # The report schema is a handful of short fields; 4096 only ever bought
+            # unused headroom, and on a metered free tier headroom is the cost.
+            max_tokens=1536,
         )
         ctx.record_llm(result, "ai_report", "company_report")
         research.generation_cost_usd = result.cost_usd

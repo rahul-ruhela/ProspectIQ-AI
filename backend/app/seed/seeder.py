@@ -13,7 +13,7 @@ from app.models.admin import AIModel, AIProvider, Connector, ScoringRule, Servic
 from app.models.enums import UserRole
 from app.models.geo import Country, Industry
 from app.models.org import Organization, Permission, Role, User
-from app.seed.data import AI_MODELS, CONNECTORS, COUNTRIES, INDUSTRIES, SERVICES
+from app.seed.data import AI_MODELS, AI_PROVIDERS, CONNECTORS, COUNTRIES, INDUSTRIES, SERVICES
 from app.services.scoring import DEFAULT_WEIGHTS, WEIGHT_DESCRIPTIONS
 
 logger = get_logger(__name__)
@@ -124,18 +124,10 @@ def seed_services(db: Session) -> int:
 
 
 def seed_providers_and_models(db: Session) -> None:
-    provider = db.execute(
-        select(AIProvider).where(AIProvider.slug == "anthropic")
-    ).scalar_one_or_none()
-    if provider is None:
-        db.add(
-            AIProvider(
-                slug="anthropic",
-                name="Anthropic",
-                base_url="https://api.anthropic.com",
-                is_enabled=True,
-            )
-        )
+    existing = {p.slug for p in db.execute(select(AIProvider)).scalars()}
+    for slug, name, base_url in AI_PROVIDERS:
+        if slug not in existing:
+            db.add(AIProvider(slug=slug, name=name, base_url=base_url, is_enabled=True))
     known = {m.model_id: m for m in db.execute(select(AIModel)).scalars()}
     for provider_slug, model_id, display, tier, cost_in, cost_out, max_out in AI_MODELS:
         model = known.get(model_id)

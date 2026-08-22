@@ -114,7 +114,7 @@ Yes — and it says so plainly on the Settings page and in `/system/status`.
 | Business discovery | **OpenStreetMap (Overpass)** — keyless, returns structured business records (name, website, phone, address) with a citable element URL | Add `SERPER_API_KEY`, Google CSE or a SearXNG instance for open-web reach beyond mapped businesses |
 | Website research | Full — first-party crawler | Same |
 | Technology, contacts, verification, signals, scoring | Full — deterministic engines | Same |
-| Report narrative | Rules engine: grounded, factual, less fluent | `ANTHROPIC_API_KEY` enables synthesis, email drafts and call scripts |
+| Report narrative | Rules engine: grounded, factual, less fluent | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` enables synthesis, email drafts and call scripts |
 
 The LLM is never the source of a fact. It is given the crawled text and the structured
 findings and is instructed to answer "Unknown" rather than fill a gap.
@@ -131,7 +131,7 @@ backend/
     api/v1/        Auth, campaigns, jobs, companies, agents, CRM, analytics, admin
     connectors/    Discovery sources (OpenStreetMap, Serper, Google CSE, SearXNG, DuckDuckGo)
     core/          Config, database, security, RBAC dependencies, logging
-    llm/           Anthropic client with tiered models and per-call cost accounting
+    llm/           Multi-provider client (Anthropic, OpenAI) with tiered models and per-call cost accounting
     models/        48 tables — every outward fact carries provenance
     scraper/       robots-aware fetcher, crawler, extractors, technology signatures
     schemas/       Pydantic request/response contracts
@@ -141,7 +141,7 @@ backend/
 ```
 
 **Stack:** Python 3.12 · FastAPI · SQLAlchemy 2 · Alembic · PostgreSQL (+pgvector) ·
-Redis · Celery · httpx · BeautifulSoup · Playwright (optional) · Anthropic.
+Redis · Celery · httpx · BeautifulSoup · Playwright (optional) · Anthropic · OpenAI.
 
 ### Data model: provenance is structural
 

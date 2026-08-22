@@ -1,8 +1,11 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import { devStackPlugin } from './devstack.plugin'
 
 export default defineConfig({
-  plugins: [react()],
+  // devStackPlugin is `apply: 'serve'`, so it exists in `npm run dev` only and is
+  // never part of a production bundle.
+  plugins: [react(), devStackPlugin()],
   server: {
     port: 5173,
     host: true,

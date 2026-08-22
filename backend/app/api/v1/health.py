@@ -49,11 +49,24 @@ def system_status() -> dict:
         "environment": settings.ENVIRONMENT,
         "llm": {
             "available": llm.available,
+            "providers": llm.configured_providers,
+            "free_tier_only": settings.LLM_FREE_TIER_ONLY,
             "cheap_model": settings.LLM_CHEAP_MODEL,
+            "cheap_chain": llm.chain_for("cheap"),
+            "cheap_available": bool(llm.usable_chain("cheap")),
+            "cheap_reason": llm.unavailable_reason(settings.LLM_CHEAP_MODEL),
             "smart_model": settings.LLM_SMART_MODEL,
+            "smart_chain": llm.chain_for("smart"),
+            "smart_available": bool(llm.usable_chain("smart")),
+            "smart_reason": llm.unavailable_reason(settings.LLM_SMART_MODEL),
+            # Per-model daily usage, so the UI can show what free capacity is left.
+            "quota": llm.quota_snapshot()["models"],
             "note": None
             if llm.available
-            else "No ANTHROPIC_API_KEY configured. Reports fall back to the rules engine.",
+            else "The selected models cannot be served. Set the key for their vendor "
+            "(GEMINI_API_KEY for gemini-*, ANTHROPIC_API_KEY for claude-*, "
+            "OPENAI_API_KEY for gpt-*), or clear LLM_FREE_TIER_ONLY to allow paid "
+            "models. Reports fall back to the rules engine either way.",
         },
         "discovery_connectors": connectors,
         "discovery_available": any(c["available"] for c in connectors),

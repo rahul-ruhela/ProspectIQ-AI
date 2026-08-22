@@ -49,10 +49,36 @@ class Settings(BaseSettings):
 
     # --- llm providers (optional; features degrade gracefully when absent) ---
     ANTHROPIC_API_KEY: str = ""
-    LLM_CHEAP_MODEL: str = "claude-haiku-4-5"
-    LLM_SMART_MODEL: str = "claude-opus-5"
+    OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+    # The vendor is inferred from the model id (claude-* -> Anthropic, gpt-*/o* ->
+    # OpenAI, gemini-* -> Google), so a tier can be pointed at any vendor without
+    # code changes.
+    LLM_CHEAP_MODEL: str = "gemini-3.5-flash-lite"
+    LLM_SMART_MODEL: str = "gemini-3.5-flash"
+    # Failover chains, tried left to right. Free quotas are metered per model per
+    # day, so listing several multiplies the daily free capacity: when one refuses
+    # work the facade moves to the next instead of abandoning the run. Blank falls
+    # back to the single model above.
+    LLM_CHEAP_MODEL_CHAIN: str = (
+        "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest"
+    )
+    LLM_SMART_MODEL_CHAIN: str = "gemini-3.5-flash,gemini-3.7-flash,gemini-flash-latest"
+    # Local ceiling per model per UTC day. 0 means "spend until the provider says
+    # no", which is right for a free tier with undocumented limits.
+    LLM_DAILY_CAP_PER_MODEL: int = 0
     LLM_MAX_OUTPUT_TOKENS: int = 4096
+    # Prompts are truncated to this many characters before being sent. Crawled page
+    # text is the only unbounded input, and its tail is boilerplate, so trimming it
+    # cuts token spend hard without changing what the model concludes.
+    LLM_MAX_PROMPT_CHARS: int = 12000
     LLM_ENABLED: bool = True
+    # Hard spend guard. While true the facade refuses every model that has no
+    # free tier, even when a paid key is present, and reports zero cost. An
+    # exhausted free quota therefore degrades to the rules engine rather than
+    # quietly moving the work onto a billed vendor. Set false only after
+    # deliberately deciding to pay.
+    LLM_FREE_TIER_ONLY: bool = True
 
     # --- discovery connectors (optional) ---
     SERPER_API_KEY: str = ""
@@ -95,6 +121,23 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @staticmethod
+    def _chain(raw: str, fallback: str) -> list[str]:
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        if fallback and fallback not in models:
+            # The explicitly configured single model always leads the chain, so
+            # setting LLM_CHEAP_MODEL keeps working exactly as it reads.
+            models.insert(0, fallback)
+        return models or ([fallback] if fallback else [])
+
+    @property
+    def cheap_model_chain(self) -> list[str]:
+        return self._chain(self.LLM_CHEAP_MODEL_CHAIN, self.LLM_CHEAP_MODEL)
+
+    @property
+    def smart_model_chain(self) -> list[str]:
+        return self._chain(self.LLM_SMART_MODEL_CHAIN, self.LLM_SMART_MODEL)
 
 
 @lru_cache

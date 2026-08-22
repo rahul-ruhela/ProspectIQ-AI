@@ -164,7 +164,10 @@ Check what is live at any time: `GET /system/status`, or the Settings page.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(empty)* | Enables report synthesis. Absent → rules engine |
+| `ANTHROPIC_API_KEY` | *(empty)* | Key for `claude-*` models. Enables report synthesis |
+| `OPENAI_API_KEY` | *(empty)* | Key for `gpt-*` / `o*` models. Enables report synthesis |
+| `LLM_CHEAP_MODEL` | `claude-haiku-4-5` | Model id picks the vendor. Absent key → rules engine |
+| `LLM_SMART_MODEL` | `claude-opus-5` | Model id picks the vendor. Absent key → rules engine |
 | `LLM_CHEAP_MODEL` | `claude-haiku-4-5` | Strategy planning; runs often |
 | `LLM_SMART_MODEL` | `claude-opus-5` | Report synthesis; qualified prospects only |
 | `LLM_ENABLED` | `true` | Master switch |
@@ -282,5 +285,6 @@ automatically by the `reap_stuck_jobs` maintenance task.
 **A company is `needs_verification` with "almost no text".** The site is
 JavaScript-rendered. Enable Playwright. The platform deliberately does not call it fake.
 
-**Reports read mechanically.** No `ANTHROPIC_API_KEY` — the rules engine is writing
+**Reports read mechanically.** No key for the selected models (`ANTHROPIC_API_KEY` for
+`claude-*`, `OPENAI_API_KEY` for `gpt-*`) — the rules engine is writing
 them. Facts are identical either way; only the prose differs.
