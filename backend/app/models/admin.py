@@ -106,6 +106,23 @@ class AIUsage(UUIDMixin, TimestampMixin, Base):
     purpose: Mapped[str | None] = mapped_column(String(120))
 
 
+class SpendPolicyRow(UUIDMixin, TimestampMixin, Base):
+    """The operator's ceiling on paid LLM spend. One row; edited from the UI.
+
+    Kept in the database rather than the environment because it is a business
+    decision an operator changes at runtime, not deployment configuration.
+    """
+
+    __tablename__ = "llm_spend_policy"
+
+    # Paid models stay off until someone deliberately turns them on.
+    allow_paid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    daily_limit_usd: Mapped[float] = mapped_column(Float, default=0.50, nullable=False)
+    monthly_limit_usd: Mapped[float] = mapped_column(Float, default=20.0, nullable=False)
+    # Percentage of a limit at which the UI starts warning.
+    alert_threshold_pct: Mapped[float] = mapped_column(Float, default=80.0, nullable=False)
+
+
 class CostTracking(UUIDMixin, TimestampMixin, Base):
     """Daily rollup so budget checks never scan the raw usage table."""
 

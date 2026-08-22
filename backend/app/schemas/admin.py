@@ -128,3 +128,34 @@ class CostSummary(BaseModel):
     cost_per_prospect_usd: float
     by_model: list[dict[str, float | str | int]]
     by_agent: list[dict[str, float | str | int]]
+
+
+class SpendPolicyOut(BaseModel):
+    allow_paid: bool
+    daily_limit_usd: float
+    monthly_limit_usd: float
+    alert_threshold_pct: float
+
+
+class SpendPolicyUpdate(BaseModel):
+    allow_paid: bool | None = None
+    # Capped rather than unbounded: the whole point of this control is that a
+    # mistyped figure cannot become an unlimited spend.
+    daily_limit_usd: float | None = Field(None, ge=0, le=1000)
+    monthly_limit_usd: float | None = Field(None, ge=0, le=10000)
+    alert_threshold_pct: float | None = Field(None, ge=0, le=100)
+
+
+class SpendStatus(BaseModel):
+    policy: SpendPolicyOut
+    spent_today_usd: float
+    spent_month_usd: float
+    daily_used_pct: float
+    monthly_used_pct: float
+    daily_remaining_usd: float
+    monthly_remaining_usd: float
+    paid_available: bool
+    blocked_reason: str | None
+    alerting: bool
+    free_chain: list[str]
+    paid_chain: list[str]

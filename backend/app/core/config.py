@@ -64,6 +64,11 @@ class Settings(BaseSettings):
         "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest"
     )
     LLM_SMART_MODEL_CHAIN: str = "gemini-3.5-flash,gemini-3.7-flash,gemini-flash-latest"
+    # Paid models, appended after the free chain and used only when the spend policy
+    # allows it and the budget still has room. They are the safety net for when the
+    # free quota runs out mid-job, not the first choice.
+    LLM_CHEAP_PAID_CHAIN: str = "gpt-4o-mini"
+    LLM_SMART_PAID_CHAIN: str = "gpt-4o"
     # Local ceiling per model per UTC day. 0 means "spend until the provider says
     # no", which is right for a free tier with undocumented limits.
     LLM_DAILY_CAP_PER_MODEL: int = 0
@@ -73,11 +78,11 @@ class Settings(BaseSettings):
     # cuts token spend hard without changing what the model concludes.
     LLM_MAX_PROMPT_CHARS: int = 12000
     LLM_ENABLED: bool = True
-    # Hard spend guard. While true the facade refuses every model that has no
-    # free tier, even when a paid key is present, and reports zero cost. An
-    # exhausted free quota therefore degrades to the rules engine rather than
-    # quietly moving the work onto a billed vendor. Set false only after
-    # deliberately deciding to pay.
+    # Hard spend guard, and the default before any policy has been saved. While
+    # true the facade refuses every model that has no free tier, even when a paid
+    # key is present. The UI spend policy (llm_spend_policy) overrides this at
+    # runtime: turning paid on there lifts the guard, but only inside the daily and
+    # monthly ceilings it also sets.
     LLM_FREE_TIER_ONLY: bool = True
 
     # --- discovery connectors (optional) ---
@@ -138,6 +143,14 @@ class Settings(BaseSettings):
     @property
     def smart_model_chain(self) -> list[str]:
         return self._chain(self.LLM_SMART_MODEL_CHAIN, self.LLM_SMART_MODEL)
+
+    @property
+    def cheap_paid_chain(self) -> list[str]:
+        return self._chain(self.LLM_CHEAP_PAID_CHAIN, "")
+
+    @property
+    def smart_paid_chain(self) -> list[str]:
+        return self._chain(self.LLM_SMART_PAID_CHAIN, "")
 
 
 @lru_cache

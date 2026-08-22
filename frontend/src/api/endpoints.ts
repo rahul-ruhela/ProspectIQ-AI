@@ -31,6 +31,8 @@ import type {
   ServiceCatalogItem,
   SystemStatus,
   User,
+  SpendPolicy,
+  SpendStatus,
 } from './types'
 
 // --- auth ---
@@ -184,5 +186,11 @@ export const listScoringRules = () =>
   api.get<ScoringRule[]>('/admin/scoring-rules').then((r) => r.data)
 export const updateScoringRule = (component: string, weight: number) =>
   api.patch<ScoringRule[]>(`/admin/scoring-rules/${component}`, { weight }).then((r) => r.data)
+export const getSpendPolicy = () =>
+  api.get<SpendStatus>('/admin/spend-policy').then((r) => r.data)
+export const updateSpendPolicy = (payload: Partial<SpendPolicy>) =>
+  api.put<SpendStatus>('/admin/spend-policy', payload).then((r) => r.data)
+export const spendStatus = () =>
+  api.get<SpendStatus>('/admin/spend-status').then((r) => r.data)
 export const costSummary = (days = 30) =>
   api.get<CostSummary>('/admin/costs', { params: { days } }).then((r) => r.data)

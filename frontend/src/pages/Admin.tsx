@@ -19,6 +19,7 @@ import {
   updateUser,
 } from '../api/endpoints'
 import type { UserRole } from '../api/types'
+import SpendControl from '../components/SpendControl'
 import {
   Card,
   ErrorState,
@@ -211,6 +212,8 @@ export default function Admin() {
       )}
 
       {tab === 'AI models' && (
+        <div className="space-y-4">
+        <SpendControl />
         <Card
           title="Models and pricing"
           description="Cheap models run on every company; the smart tier only on qualified prospects."
@@ -267,6 +270,7 @@ export default function Admin() {
             </tbody>
           </Table>
         </Card>
+        </div>
       )}
 
       {tab === 'API keys' && (

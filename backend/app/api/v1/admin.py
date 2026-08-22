@@ -10,6 +10,8 @@ from sqlalchemy import func, select
 from app.connectors.search import connector_statuses
 from app.core.deps import CurrentUser, DbSession, OrgId, RequireAdmin, audit
 from app.core.security import encrypt_secret, mask_secret
+from app.llm.client import get_llm
+from app.llm.spend import SpendPolicy, get_spend_ledger
 from app.models.admin import (
     AIModel,
     AIProvider,
@@ -18,6 +20,7 @@ from app.models.admin import (
     Connector,
     ScoringRule,
     ServiceCatalogItem,
+    SpendPolicyRow,
 )
 from app.models.company import Company
 from app.models.geo import Country, Industry
@@ -33,6 +36,9 @@ from app.schemas.admin import (
     CostSummary,
     CountryOut,
     IndustryOut,
+    SpendPolicyOut,
+    SpendPolicyUpdate,
+    SpendStatus,
     ScoringRuleOut,
     ScoringRuleUpdate,
     ServiceCatalogOut,
@@ -272,3 +278,94 @@ def costs(
             for key, cost, calls in by_agent
         ],
     )
+
+
+# --- LLM spend policy ------------------------------------------------------
+
+
+def _policy_row(db) -> SpendPolicyRow:
+    """The single policy row, created with safe defaults on first read."""
+    row = db.execute(select(SpendPolicyRow).limit(1)).scalar_one_or_none()
+    if row is None:
+        row = SpendPolicyRow()
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
+
+
+def _spend_status() -> dict:
+    ledger = get_spend_ledger()
+    llm = get_llm()
+    status_payload = ledger.status()
+    # Chains are reported so the UI can show exactly which models a change unlocks.
+    free_chain: list[str] = []
+    paid_chain: list[str] = []
+    for tier in ("cheap", "smart"):
+        for model in llm.chain_for(tier):
+            target = free_chain if _is_free(model) else paid_chain
+            if model not in target:
+                target.append(model)
+    status_payload["free_chain"] = free_chain
+    status_payload["paid_chain"] = paid_chain
+    return status_payload
+
+
+def _is_free(model: str) -> bool:
+    from app.llm.client import is_free_tier
+
+    return is_free_tier(model)
+
+
+@router.get("/spend-policy", response_model=SpendStatus)
+def get_spend_policy(_: RequireAdmin, db: DbSession) -> SpendStatus:
+    """Current ceiling plus live spend against it."""
+    row = _policy_row(db)
+    get_spend_ledger().cache_policy(
+        SpendPolicy(
+            allow_paid=row.allow_paid,
+            daily_limit_usd=row.daily_limit_usd,
+            monthly_limit_usd=row.monthly_limit_usd,
+            alert_threshold_pct=row.alert_threshold_pct,
+        )
+    )
+    return SpendStatus(**_spend_status())
+
+
+@router.put("/spend-policy", response_model=SpendStatus)
+def update_spend_policy(
+    payload: SpendPolicyUpdate, admin: RequireAdmin, db: DbSession
+) -> SpendStatus:
+    """Change the ceiling. Takes effect across every worker within the cache TTL."""
+    row = _policy_row(db)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+
+    policy = SpendPolicy(
+        allow_paid=row.allow_paid,
+        daily_limit_usd=row.daily_limit_usd,
+        monthly_limit_usd=row.monthly_limit_usd,
+        alert_threshold_pct=row.alert_threshold_pct,
+    )
+    get_spend_ledger().cache_policy(policy)
+    audit(
+        db,
+        user=admin,
+        action="llm_spend_policy_updated",
+        entity_type="llm_spend_policy",
+        detail=(
+            f"paid={'on' if policy.allow_paid else 'off'} "
+            f"daily=${policy.daily_limit_usd:.2f} monthly=${policy.monthly_limit_usd:.2f}"
+        ),
+    )
+    db.commit()
+    return SpendStatus(**_spend_status())
+
+
+@router.get("/spend-status", response_model=SpendStatus)
+def spend_status(_: RequireAdmin) -> SpendStatus:
+    """Live spend meter. Cheap enough for the UI to poll."""
+    return SpendStatus(**_spend_status())

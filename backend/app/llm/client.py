@@ -15,6 +15,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.llm.quota import get_ledger
+from app.llm.spend import get_spend_ledger
 from app.llm.providers import (
     ANTHROPIC,
     GOOGLE,
@@ -102,9 +103,10 @@ class LLMUsageTotals:
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    # Under the free-tier guard nothing is billable, so the honest cost is zero -
-    # reporting list prices there would burn campaign budgets that were never spent.
-    if settings.LLM_FREE_TIER_ONLY and is_free_tier(model):
+    # Free-tier models are not billable, so the honest cost is zero - reporting list
+    # prices for them would burn campaign budgets that were never spent. Paid models
+    # are always priced, because that number is what enforces the spend ceiling.
+    if is_free_tier(model):
         return 0.0
     rates = MODEL_PRICING.get(model)
     if rates is None:
@@ -147,7 +149,7 @@ class LLMClient:
         """
         if not settings.LLM_ENABLED:
             return False
-        if settings.LLM_FREE_TIER_ONLY and not is_free_tier(model):
+        if not is_free_tier(model) and not get_spend_ledger().paid_allowed():
             return False
         return provider_for(model) in self._providers
 
@@ -155,12 +157,10 @@ class LLMClient:
         """Why ``model`` cannot be called, or None when it can."""
         if not settings.LLM_ENABLED:
             return "LLM_ENABLED is false."
-        if settings.LLM_FREE_TIER_ONLY and not is_free_tier(model):
-            return (
-                f"{model} has no free tier and LLM_FREE_TIER_ONLY is on. "
-                "Use a gemini-* free-tier model, or set LLM_FREE_TIER_ONLY=false "
-                "to allow paid calls."
-            )
+        if not is_free_tier(model):
+            blocked = get_spend_ledger().block_reason()
+            if blocked:
+                return f"{model} is a paid model. {blocked}"
         if provider_for(model) not in self._providers:
             return f"No API key configured for the {provider_for(model)} provider."
         return None
@@ -175,11 +175,19 @@ class LLMClient:
         return chain[0] if chain else ""
 
     def chain_for(self, tier: str) -> list[str]:
-        """Every model that may serve ``tier``, best first."""
-        chain = settings.smart_model_chain if tier == SMART else settings.cheap_model_chain
-        # A model the guard forbids must never appear, or failover would walk
-        # straight onto a billed vendor.
-        return [m for m in chain if not settings.LLM_FREE_TIER_ONLY or is_free_tier(m)]
+        """Every model that may serve ``tier``, best first.
+
+        Free models always lead. Paid models are appended only while the operator's
+        spend policy permits them and both budget ceilings still have room, so the
+        platform exhausts what is free before it spends anything.
+        """
+        free = settings.smart_model_chain if tier == SMART else settings.cheap_model_chain
+        free = [m for m in free if is_free_tier(m)]
+
+        if not get_spend_ledger().paid_allowed():
+            return free
+        paid = settings.smart_paid_chain if tier == SMART else settings.cheap_paid_chain
+        return free + [m for m in paid if m not in free]
 
     def usable_chain(self, tier: str) -> list[str]:
         """Chain members that are configured and have not run out today."""
@@ -295,7 +303,12 @@ class LLMClient:
                 return LLMResult(ok=False, model=model, error=str(exc))
 
             ledger.record_call(model)
-            return self._to_result(response, model)
+            result = self._to_result(response, model)
+            if result.cost_usd > 0:
+                # Recorded before returning so the very next call sees this spend
+                # and the ceiling cannot be crossed by a burst of parallel work.
+                get_spend_ledger().record(result.cost_usd)
+            return result
 
         if last is not None:
             logger.warning("llm_chain_exhausted", tier=tier, chain=chain)

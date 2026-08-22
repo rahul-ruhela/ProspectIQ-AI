@@ -621,3 +621,25 @@ export interface SystemStatus {
   playwright_rendering: boolean
   respect_robots_txt: boolean
 }
+
+export interface SpendPolicy {
+  allow_paid: boolean
+  daily_limit_usd: number
+  monthly_limit_usd: number
+  alert_threshold_pct: number
+}
+
+export interface SpendStatus {
+  policy: SpendPolicy
+  spent_today_usd: number
+  spent_month_usd: number
+  daily_used_pct: number
+  monthly_used_pct: number
+  daily_remaining_usd: number
+  monthly_remaining_usd: number
+  paid_available: boolean
+  blocked_reason: string | null
+  alerting: boolean
+  free_chain: string[]
+  paid_chain: string[]
+}
