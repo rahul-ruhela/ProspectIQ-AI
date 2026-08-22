@@ -28,9 +28,10 @@ signals, opportunity rules — is deterministic Python and costs nothing.
 There is already a spend gate in `_worth_llm_spend()`: the expensive model is only
 used on companies that already scored ≥ 60. Low-quality prospects never reach it.
 
-**Under `LLM_FREE_TIER_ONLY=true`, `estimate_cost()` returns `0.0`.** Reporting list
-prices for calls that were never billed would eat campaign budgets that were never
-spent, so free-tier runs record exactly what they cost: zero.
+**`estimate_cost()` returns `0.0` for free-tier models.** Reporting list prices for
+calls that were never billed would eat campaign budgets that were never spent. Paid
+models are always priced truthfully — that figure is what enforces the spend ceiling
+in section 3.
 
 ### Connector cost
 
@@ -115,19 +116,78 @@ cd backend
 venv/Scripts/python.exe -c "from app.llm.quota import get_ledger; print(get_ledger().reset())"
 ```
 
-### The hard spend guard
+### Free always comes first
 
-`LLM_FREE_TIER_ONLY=true` refuses **every model without a free tier**, even when a
-paid key sits in `.env`. Your Anthropic and OpenAI keys are still in the file and
-are unreachable — verified: `claude-opus-5` and `gpt-4o` both return
-*"has no free tier and LLM_FREE_TIER_ONLY is on."*
-
-Failover chains respect the guard too, so no chain can ever walk onto a billed
-vendor.
+Every chain lists free models first and exhausts them before a paid model is even
+considered. Paid entries are appended only when the UI spend policy allows it and
+both ceilings still have room — see section 3.
 
 ---
 
-## 3. Spending fewer tokens
+## 3. Paid models, capped from the UI
+
+Paid models are now available as a **fallback**, never a first choice, and only
+inside a ceiling you set yourself.
+
+**Admin → AI models → "Paid AI spend"**
+
+| Control | What it does |
+|---|---|
+| Allow paid models | Master toggle. Off by default |
+| Daily limit | Presets $0.50 / $1 / $5 / $20, or type any figure. Resets at UTC midnight |
+| Monthly limit | Presets $5 / $20 / $50 / $100, or custom. Calendar month, UTC |
+| Warn at | 50 / 75 / 80 / 90% — the meter turns amber past this point |
+
+Both meters show live spend against the limit, with the remaining balance underneath.
+The panel also prints the exact model order a change unlocks, so you can see what
+you just enabled:
+
+```
+gemini-3.5-flash-lite  gemini-3.1-flash-lite  gemini-flash-lite-latest  then  gpt-4o-mini
+```
+
+### How the ceiling is enforced
+
+`backend/app/llm/spend.py` keeps two counters — spend today and spend this month —
+and `chain_for()` appends paid models **only** while both still have room. The
+instant a limit is crossed, paid models vanish from the chain and the run falls back
+to the rules engine.
+
+Three properties worth knowing:
+
+* **Counters live in Redis**, so the API and every Celery worker enforce one shared
+  budget. Two workers each holding a private half-spent counter would together
+  overshoot the limit.
+* **Redis is a cache, not the record.** `ai_usage` rows are the truth, so a flushed
+  cache reseeds from the database rather than resetting spend to zero and handing
+  out a second budget.
+* **The check is pre-flight.** A call's true cost is unknown until it returns, so
+  the guard blocks the *next* call once the line is crossed. Overshoot is bounded by
+  one call — fractions of a cent at these model prices.
+
+### Master kill switch
+
+`LLM_FREE_TIER_ONLY=true` in `.env` overrides the UI entirely: no paid call, ever,
+whatever the policy says. Use it for CI or a shared demo. It is now `false`, so the
+UI policy governs.
+
+### Measured cost
+
+A real call through the fallback chain, after the free Gemini models were exhausted:
+
+```
+model  : gpt-4o-mini
+tokens : 19 in / 2 out
+cost   : $0.000004
+```
+
+You were right that OpenAI is cheap. At that rate a $0.50 daily cap is roughly
+125,000 short calls — and the platform only makes one LLM call per job plus one per
+qualified prospect, so the cap is very hard to reach in normal use.
+
+---
+
+## 4. Spending fewer tokens
 
 Already in place:
 
@@ -142,7 +202,7 @@ Already in place:
 
 ---
 
-## 4. Current status of your keys
+## 5. Current status of your keys
 
 Measured against live endpoints on 2026-08-22:
 

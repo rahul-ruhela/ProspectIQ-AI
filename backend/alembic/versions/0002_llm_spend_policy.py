@@ -34,8 +34,20 @@ def upgrade() -> None:
         sa.Column("daily_limit_usd", sa.Float(), nullable=False, server_default="0.5"),
         sa.Column("monthly_limit_usd", sa.Float(), nullable=False, server_default="20.0"),
         sa.Column("alert_threshold_pct", sa.Float(), nullable=False, server_default="80.0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        # TimestampMixin populates these with server_default rather than in Python,
+        # so the column definitions must carry it or every insert fails on NULL.
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
 
 

@@ -240,6 +240,10 @@ class SpendLedger:
     # --- enforcement ------------------------------------------------------
     def paid_allowed(self) -> bool:
         """True when paid models may be used right now."""
+        # Env-level master override. Deployments that must never bill - CI, a shared
+        # demo - set this and the UI cannot switch it back on.
+        if settings.LLM_FREE_TIER_ONLY:
+            return False
         policy = self.policy()
         if not policy.allow_paid:
             return False
@@ -251,6 +255,8 @@ class SpendLedger:
 
     def block_reason(self) -> str | None:
         """Why paid models are unavailable, or None when they are available."""
+        if settings.LLM_FREE_TIER_ONLY:
+            return "LLM_FREE_TIER_ONLY is set in the environment; paid models are disabled there."
         policy = self.policy()
         if not policy.allow_paid:
             return "Paid models are switched off."
